@@ -48,10 +48,11 @@ inline error_code document::allocate(size_t capacity) noexcept {
   size_t tape_capacity = SIMDJSON_ROUNDUP_N(capacity + 3, 64);
   // a document with only zero-length strings... could have capacity/3 string
   // and we would need capacity/3 * 5 bytes on the string buffer
-  if(5 * (capacity / 3) + SIMDJSON_PADDING < SIMDJSON_PADDING) {
+  // (capacity/3 * 13 bytes under AddressSanitizer, see SIMDJSON_ASAN_ANNOTATIONS)
+  if(SIMDJSON_STRING_BUF_BYTES_PER_STRING * (capacity / 3) + SIMDJSON_PADDING < SIMDJSON_PADDING) {
     return CAPACITY; // overflow, only happen on legacy 32-bit systems with very large capacity
   }
-  size_t string_capacity = SIMDJSON_ROUNDUP_N(5 * (capacity / 3) + SIMDJSON_PADDING, 64);
+  size_t string_capacity = SIMDJSON_ROUNDUP_N(SIMDJSON_STRING_BUF_BYTES_PER_STRING * (capacity / 3) + SIMDJSON_PADDING, 64);
   string_buf.reset( new (std::nothrow) uint8_t[string_capacity]);
   tape.reset(new (std::nothrow) uint64_t[tape_capacity]);
   if(!(string_buf && tape)) {

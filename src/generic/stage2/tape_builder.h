@@ -88,9 +88,23 @@ struct tape_builder_impl {
   tape_writer tape;
 public:
   simdjson_inline tape_builder_impl(dom::document &doc) noexcept;
+#if SIMDJSON_ASAN_ANNOTATIONS
+  /** Clear the poison left by a previous parse (the document may be reused). */
+  simdjson_inline void asan_unpoison_all(dom::document &doc, size_t len) noexcept;
+  /**
+   * Poison the unused tail of the string buffer and of the tape. We only do so
+   * after a successful parse: document_stream calls stage2 once more at the end
+   * of a stream (it returns EMPTY), and the last document must stay readable.
+   */
+  simdjson_inline void asan_poison_unused(dom::document &doc) noexcept;
+#endif
 private:
   /** Next write location in the string buf for stage 2 parsing */
   uint8_t *current_string_buf_loc;
+#if SIMDJSON_ASAN_ANNOTATIONS
+  /** Whether the string buffer has room for a redzone after each string. */
+  bool string_redzones;
+#endif
 
   simdjson_inline uint32_t next_tape_index(json_iterator &iter) const noexcept;
   simdjson_inline void start_container(json_iterator &iter) noexcept;
@@ -113,10 +127,24 @@ struct tape_builder {
     json_iterator iter(dom_parser, STREAMING ? dom_parser.next_structural_index : 0);
     if (dom_parser._unpadded) {
       tape_builder_impl<true> builder(doc);
+#if SIMDJSON_ASAN_ANNOTATIONS
+      builder.asan_unpoison_all(doc, dom_parser.len);
+      error_code error = iter.walk_document<STREAMING, true>(builder);
+      if (error == SUCCESS) { builder.asan_poison_unused(doc); }
+      return error;
+#else
       return iter.walk_document<STREAMING, true>(builder);
+#endif
     } else {
       tape_builder_impl<false> builder(doc);
+#if SIMDJSON_ASAN_ANNOTATIONS
+      builder.asan_unpoison_all(doc, dom_parser.len);
+      error_code error = iter.walk_document<STREAMING, false>(builder);
+      if (error == SUCCESS) { builder.asan_poison_unused(doc); }
+      return error;
+#else
       return iter.walk_document<STREAMING, false>(builder);
+#endif
     }
   }
 };
@@ -182,6 +210,28 @@ simdjson_warn_unused simdjson_inline error_code tape_builder_impl<UNPADDED>::inc
 
 template <bool UNPADDED>
 simdjson_inline tape_builder_impl<UNPADDED>::tape_builder_impl(dom::document &doc) noexcept : tape{doc.tape.get()}, current_string_buf_loc{doc.string_buf.get()} {}
+
+#if SIMDJSON_ASAN_ANNOTATIONS
+template <bool UNPADDED>
+simdjson_inline void tape_builder_impl<UNPADDED>::asan_unpoison_all(dom::document &doc, size_t len) noexcept {
+  // We ask the allocator for the buffer sizes rather than recomputing them so
+  // that we stay within bounds even if document::allocate was compiled without
+  // AddressSanitizer (in which case we do not add redzones between strings).
+  size_t string_buf_size = __sanitizer_get_allocated_size(doc.string_buf.get());
+  __asan_unpoison_memory_region(doc.string_buf.get(), string_buf_size);
+  __asan_unpoison_memory_region(doc.tape.get(), __sanitizer_get_allocated_size(doc.tape.get()));
+  string_redzones = string_buf_size >= SIMDJSON_STRING_BUF_BYTES_PER_STRING * (len / 3) + SIMDJSON_PADDING;
+}
+
+template <bool UNPADDED>
+simdjson_inline void tape_builder_impl<UNPADDED>::asan_poison_unused(dom::document &doc) noexcept {
+  uint8_t *string_buf_end = doc.string_buf.get() + __sanitizer_get_allocated_size(doc.string_buf.get());
+  __asan_poison_memory_region(current_string_buf_loc, size_t(string_buf_end - current_string_buf_loc));
+  uint8_t *tape_end = reinterpret_cast<uint8_t *>(doc.tape.get()) + __sanitizer_get_allocated_size(doc.tape.get());
+  uint8_t *tape_loc = reinterpret_cast<uint8_t *>(tape.next_tape_loc);
+  __asan_poison_memory_region(tape_loc, size_t(tape_end - tape_loc));
+}
+#endif
 
 template <bool UNPADDED>
 simdjson_warn_unused simdjson_inline error_code tape_builder_impl<UNPADDED>::visit_string(json_iterator &iter, const uint8_t *value, bool key) noexcept {
@@ -434,6 +484,16 @@ simdjson_inline void tape_builder_impl<UNPADDED>::on_end_string(uint8_t *dst) no
   // be NULL terminated? It comes at a small cost
   *dst = 0;
   current_string_buf_loc = dst + 1;
+#if SIMDJSON_ASAN_ANNOTATIONS
+  // Poison 1 to 8 bytes after the string so that the next string starts on an
+  // 8-byte boundary. This must happen after parse_string, which may write past
+  // the end of the string.
+  if (string_redzones) {
+    uint8_t *next = reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(current_string_buf_loc) + 8) & ~uintptr_t(7));
+    __asan_poison_memory_region(current_string_buf_loc, size_t(next - current_string_buf_loc));
+    current_string_buf_loc = next;
+  }
+#endif
 }
 
 } // namespace stage2

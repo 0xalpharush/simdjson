@@ -213,6 +213,41 @@ using std::size_t;
 #define SIMDJSON_NO_SANITIZE_MEMORY
 #endif
 
+// Under AddressSanitizer, the DOM parser poisons the parts of its string
+// buffer and tape that do not hold parsed data, so that an access past the
+// end of a parsed string (into the next one) or past the end of the used
+// tape is reported. Define SIMDJSON_DISABLE_ASAN_ANNOTATIONS to opt out.
+// Without AddressSanitizer, SIMDJSON_ASAN_ANNOTATIONS is 0 and nothing changes.
+#ifndef SIMDJSON_ASAN_ANNOTATIONS
+#if defined(__has_feature) && !defined(_MSC_VER)
+#  if __has_feature(address_sanitizer)
+#define SIMDJSON_ASAN_ANNOTATIONS 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(_MSC_VER)
+#undef SIMDJSON_ASAN_ANNOTATIONS
+#define SIMDJSON_ASAN_ANNOTATIONS 1
+#endif
+#if defined(SIMDJSON_DISABLE_ASAN_ANNOTATIONS) || !defined(SIMDJSON_ASAN_ANNOTATIONS)
+#undef SIMDJSON_ASAN_ANNOTATIONS
+#define SIMDJSON_ASAN_ANNOTATIONS 0
+#endif
+#endif // SIMDJSON_ASAN_ANNOTATIONS
+
+#if SIMDJSON_ASAN_ANNOTATIONS
+// Declared here rather than by including the sanitizer headers, which are not
+// available on every system that supports AddressSanitizer.
+extern "C" void __asan_poison_memory_region(void const volatile *addr, size_t size);
+extern "C" void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+extern "C" size_t __sanitizer_get_allocated_size(const volatile void *p);
+// Each string in the DOM string buffer is followed by 1 to 8 poisoned bytes
+// so that the next string starts on an 8-byte boundary (the granularity of
+// AddressSanitizer). A minimal string thus needs 13 bytes instead of 5.
+#define SIMDJSON_STRING_BUF_BYTES_PER_STRING 13
+#else
+#define SIMDJSON_STRING_BUF_BYTES_PER_STRING 5
+#endif
+
 #if SIMDJSON_VISUAL_STUDIO
 // This is one case where we do not distinguish between
 // regular visual studio and clang under visual studio.
